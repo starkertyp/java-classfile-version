@@ -1,4 +1,4 @@
-{ rustPlatform }:
+{ zlib, pkg-config, rustPlatform }:
 let toml = (builtins.fromTOML (builtins.readFile ./Cargo.toml));
 in rustPlatform.buildRustPackage {
   pname = toml.package.name;
@@ -8,6 +8,7 @@ in rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = ./Cargo.lock;
 
-  buildInputs = [ ];
+  buildInputs = [ zlib ];
+  nativeBuildInputs = [ pkg-config ];
 }
 
