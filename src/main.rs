@@ -95,7 +95,6 @@ impl TryFrom<String> for ExtractedJar {
 
         let mut archive = zip::ZipArchive::new(file)?;
         trace!("Got archive {archive:?}");
-        // TODO need to clean this up afterwards
         let targetdir = tempfile::TempDir::with_prefix("java-classfile-version")?;
         trace!("Created temporary directory {targetdir:?}");
         let path = targetdir.path();
