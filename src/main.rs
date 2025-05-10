@@ -2,16 +2,15 @@ mod cli;
 
 use anyhow::bail;
 use cli::Cli;
-use glob::glob;
 use std::{
     fmt::Display,
-    fs::File,
-    io::{self, Read},
+    fs::{create_dir_all, File},
+    io::{self, Read, Seek},
     path::{Path, PathBuf},
 };
 use tempfile::TempDir;
 use thiserror::Error;
-use zip::result::ZipError;
+use zip::{result::ZipError, ZipArchive};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone)]
 struct JavaClass(pub u8);
@@ -62,16 +61,13 @@ enum ExtractedJarError {
     IO(#[from] io::Error),
     #[error("Failed to read jar as zip file")]
     Zip(#[from] ZipError),
-    #[error("Failed to read extracted files")]
-    GlobPattern(#[from] glob::PatternError),
-    #[error("Glob error")]
-    Glob(#[from] glob::GlobError),
     #[error("Not a Jar file")]
     NotAJar,
     #[error("Should have got at least 4 bytes, got {0}")]
     InsufficientBytes(usize),
 }
 
+#[allow(dead_code)]
 struct ExtractedJar {
     rootdir: TempDir,
     classfiles: Vec<PathBuf>,
@@ -99,25 +95,50 @@ impl TryFrom<String> for ExtractedJar {
         trace!("Created temporary directory {targetdir:?}");
         let path = targetdir.path();
         debug!("Trying to extract the JAR");
-        archive.extract(path)?;
-        debug!("Extraction successful");
-        let mut classfiles = Vec::new();
-        for file in glob(&format!("{}/**/*.class", path.display()))? {
-            match file {
-                Ok(file) => {
-                    if !file.starts_with("META") {
-                        debug!("Found relevant file {file:?} in JAR");
-                        classfiles.push(file);
-                    }
+        let classfiles = get_class_files_in_jar(&archive);
+        let mut out_classfiles = Vec::new();
+        debug!("classfiles in jar: {classfiles:?}");
+        // NOTE: This can't be done in parallel with rayon as the archive can't be borrowed as mutable in that case
+        // RwLock doesn't help, can't get a `mut` from `read()` and calling `write()` would lock, defeating the parallel approach completely
+        for file in classfiles {
+            debug!("Trying to extract {file}");
+            trace!("Trying to get a file for {file}");
+            let mut file = archive.by_name(&file)?;
+            trace!("Got something");
+
+            // realistically this should always be the case
+            if let Some(enclosed_name) = file.enclosed_name() {
+                trace!("Got name {}", enclosed_name.display());
+                let out_path = path.join(enclosed_name);
+                trace!("out path: {}", out_path.display());
+                // this should,
+                let parent = (&out_path).parent();
+                if let Some(parent) = parent {
+                    create_dir_all(parent)?;
                 }
-                Err(e) => return Err(e.into()),
+                let mut out_file = File::create(out_path.clone())?;
+                std::io::copy(&mut file, &mut out_file)?;
+                out_classfiles.push(out_path);
             }
         }
+
         Ok(Self {
             rootdir: targetdir,
-            classfiles,
+            classfiles: out_classfiles,
         })
     }
+}
+
+/// Searches for all .class files outside of a META-INF directory.
+///
+/// This mostly exists so that the borrow for this drops after this is done,
+/// or the archive.by_name later on complains about multiple borrows existing
+fn get_class_files_in_jar<T: Read + Seek>(jar: &ZipArchive<T>) -> Vec<String> {
+    jar.file_names()
+        .filter(|name| name.ends_with(".class"))
+        .filter(|name| !name.starts_with("META-INF"))
+        .map(|name| name.to_owned())
+        .collect()
 }
 
 fn handle_class<P: AsRef<Path>>(file: P) -> Result<JavaClass, JavaClassError> {
