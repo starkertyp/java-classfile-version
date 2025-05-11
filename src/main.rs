@@ -4,11 +4,10 @@ use anyhow::bail;
 use cli::Cli;
 use std::{
     fmt::Display,
-    fs::{create_dir_all, File},
+    fs::File,
     io::{self, Read, Seek},
-    path::{Path, PathBuf},
+    path::Path,
 };
-use tempfile::TempDir;
 use thiserror::Error;
 use zip::{result::ZipError, ZipArchive};
 
@@ -34,10 +33,8 @@ enum JavaClassError {
     NotAClassFile,
 }
 
-impl TryFrom<File> for JavaClass {
-    type Error = JavaClassError;
-
-    fn try_from(mut f: File) -> Result<Self, Self::Error> {
+impl JavaClass {
+    pub fn new<T: Read>(mut f: T) -> Result<Self, JavaClassError> {
         let mut buffer = [0; 8];
 
         let read_bytes = f.read(&mut buffer)?;
@@ -65,12 +62,13 @@ enum ExtractedJarError {
     NotAJar,
     #[error("Should have got at least 4 bytes, got {0}")]
     InsufficientBytes(usize),
+    #[error("todo")]
+    JavaClass(#[from] JavaClassError),
 }
 
 #[allow(dead_code)]
 struct ExtractedJar {
-    rootdir: TempDir,
-    classfiles: Vec<PathBuf>,
+    classfiles: Vec<JavaClass>,
 }
 
 impl TryFrom<String> for ExtractedJar {
@@ -91,10 +89,7 @@ impl TryFrom<String> for ExtractedJar {
 
         let mut archive = zip::ZipArchive::new(file)?;
         trace!("Got archive {archive:?}");
-        let targetdir = tempfile::TempDir::with_prefix("java-classfile-version")?;
-        trace!("Created temporary directory {targetdir:?}");
-        let path = targetdir.path();
-        debug!("Trying to extract the JAR");
+        debug!("Trying to get all relevant files in the JAR");
         let classfiles = get_class_files_in_jar(&archive);
         let mut out_classfiles = Vec::new();
         debug!("classfiles in jar: {classfiles:?}");
@@ -103,27 +98,13 @@ impl TryFrom<String> for ExtractedJar {
         for file in classfiles {
             debug!("Trying to extract {file}");
             trace!("Trying to get a file for {file}");
-            let mut file = archive.by_name(&file)?;
+            let file = archive.by_name(&file)?;
             trace!("Got something");
-
-            // realistically this should always be the case
-            if let Some(enclosed_name) = file.enclosed_name() {
-                trace!("Got name {}", enclosed_name.display());
-                let out_path = path.join(enclosed_name);
-                trace!("out path: {}", out_path.display());
-                // this should,
-                let parent = (&out_path).parent();
-                if let Some(parent) = parent {
-                    create_dir_all(parent)?;
-                }
-                let mut out_file = File::create(out_path.clone())?;
-                std::io::copy(&mut file, &mut out_file)?;
-                out_classfiles.push(out_path);
-            }
+            let javaclass = JavaClass::new(file)?;
+            out_classfiles.push(javaclass);
         }
 
         Ok(Self {
-            rootdir: targetdir,
             classfiles: out_classfiles,
         })
     }
@@ -144,7 +125,7 @@ fn get_class_files_in_jar<T: Read + Seek>(jar: &ZipArchive<T>) -> Vec<String> {
 fn handle_class<P: AsRef<Path>>(file: P) -> Result<JavaClass, JavaClassError> {
     let file = File::open(file)?;
     debug!("Read {file:?}");
-    let class = JavaClass::try_from(file)?;
+    let class = JavaClass::new(file)?;
     Ok(class)
 }
 
@@ -176,10 +157,7 @@ fn main() -> anyhow::Result<()> {
             log!("Handling JAR file {file}");
             let extracted = ExtractedJar::try_from(file)?;
             let mut largest: Option<JavaClass> = None;
-            for file in extracted.classfiles {
-                let p = file.to_string_lossy();
-                debug!("Reading from {p}");
-                let class = handle_class(file)?;
+            for class in extracted.classfiles {
                 match largest {
                     Some(ref prev) => {
                         if *prev < class {
@@ -215,10 +193,7 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => return Err(e.into()),
                         Ok(extracted) => {
                             let mut largest: Option<JavaClass> = None;
-                            for file in extracted.classfiles {
-                                let p = file.to_string_lossy();
-                                debug!("Reading from {p}");
-                                let class = handle_class(file)?;
+                            for class in extracted.classfiles {
                                 match largest {
                                     Some(ref prev) => {
                                         if *prev < class {

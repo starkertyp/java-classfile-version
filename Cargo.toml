@@ -1,11 +1,10 @@
 [package]
 name = "java-classfile-version"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.37", features = ["cargo"] }
-tempfile = "3.19.1"
 thiserror = "2.0.12"
 zip = { version = "2.6.1", default-features = false, features = [ "deflate-zlib" ] }
