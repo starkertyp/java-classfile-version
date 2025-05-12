@@ -16,12 +16,15 @@ struct JavaClass(pub u8);
 
 impl Display for JavaClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // the 44 was scientifically chosen by looking at the table in
+        // https://en.wikipedia.org/wiki/Java_class_file#General_layout and doing second grade math
+        // (might be a different grade, no idea actually)
         write!(f, "{} (Java {})", self.0, self.0 - 44)
     }
 }
 
 const MAGIC_CLASS_HEADER: [u8; 4] = [202, 254, 186, 190]; // CAFEBABE
-const MAGIC_ZIP_HEADER: [u8; 4] = [80, 75, 3, 4];
+const MAGIC_ZIP_HEADER: [u8; 4] = [80, 75, 3, 4]; // I don't think this turns into anything fancy
 
 #[derive(Error, Debug)]
 enum JavaClassError {
@@ -46,6 +49,8 @@ impl JavaClass {
             return Err(JavaClassError::NotAClassFile);
         }
 
+        // Technically the version is 2 bytes large
+        // but just reading this one byte seems to be sufficient (hopefully).
         let version = buffer[7];
 
         Ok(JavaClass(version))
@@ -64,6 +69,8 @@ enum ExtractedJarError {
     InsufficientBytes(usize),
     #[error("todo")]
     JavaClass(#[from] JavaClassError),
+    #[error("No suitable class files found. Maybe this isn't actually a Jar?")]
+    NoClassFiles,
 }
 
 #[allow(dead_code)]
@@ -83,14 +90,29 @@ impl TryFrom<String> for ExtractedJar {
         if read_bytes != 4 {
             return Err(ExtractedJarError::InsufficientBytes(read_bytes));
         }
+
+        // not sure if this is even necessary. ZipArchive::new most likely does something like this as well
         if !buffer.starts_with(&MAGIC_ZIP_HEADER) {
             return Err(ExtractedJarError::NotAJar);
         }
+        // Technically we don't know if the jar is actually a jar
+        // We just know that the file is a zip file (or, well, we assume it is because the magic bytes said so)
 
         let mut archive = zip::ZipArchive::new(file)?;
+        // got here, now we can be pretty sure that this is a zip file! Wait, this isn't really what we were looking for...
+
         trace!("Got archive {archive:?}");
         debug!("Trying to get all relevant files in the JAR");
         let classfiles = get_class_files_in_jar(&archive);
+
+        // Technically, Jar files might not contain any classes. But no idea what to do with that in this context
+        if classfiles.is_empty() {
+            // when in doubt, bubble the problem up to the call site!
+            // https://en.wikipedia.org/wiki/Somebody_else%27s_problem
+            return Err(ExtractedJarError::NoClassFiles);
+        }
+
+        // This is definitely a zip with class files! Don't know if that is meaningfully different from a Jar. Assuming it isn't...
         let mut out_classfiles = Vec::new();
         debug!("classfiles in jar: {classfiles:?}");
         // NOTE: This can't be done in parallel with rayon as the archive can't be borrowed as mutable in that case
@@ -117,6 +139,8 @@ impl TryFrom<String> for ExtractedJar {
 fn get_class_files_in_jar<T: Read + Seek>(jar: &ZipArchive<T>) -> Vec<String> {
     jar.file_names()
         .filter(|name| name.ends_with(".class"))
+        // META-INF can contain .class files, no idea what they do
+        // Pretend/hope that they don't matter
         .filter(|name| !name.starts_with("META-INF"))
         .map(|name| name.to_owned())
         .collect()
@@ -127,12 +151,6 @@ fn handle_class<P: AsRef<Path>>(file: P) -> Result<JavaClass, JavaClassError> {
     debug!("Read {file:?}");
     let class = JavaClass::new(file)?;
     Ok(class)
-}
-
-#[derive(Error, Debug)]
-pub enum ProgramError {
-    #[error("Found a class with version {too_high:?}, which is higher than the given maximum of {max:?}")]
-    TooHigh { too_high: u8, max: u8 },
 }
 
 fn handle_too_high(class: &JavaClass, max: &Option<u8>, too_high: &mut Option<u8>) {
@@ -180,6 +198,7 @@ fn main() -> anyhow::Result<()> {
             handle_too_high(&class, &max, &mut too_high);
         } else {
             // no idea what this is, guess
+            // doesn't really matter what option we try first, so class it is
             match handle_class(&file) {
                 Ok(class) => {
                     log!("Class version is {}", class);
