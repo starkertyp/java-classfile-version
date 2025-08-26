@@ -14,7 +14,7 @@ pub enum CliError {
 #[derive(Debug)]
 pub struct Cli {
     pub files: Vec<String>,
-    pub max: Option<u8>,
+    pub max: Option<u16>,
 }
 
 pub static LOG_LEVEL: Mutex<u8> = Mutex::new(0);
@@ -25,7 +25,7 @@ impl Cli {
             .arg(
                 arg!(-m --max <MAXIMUM> "maximum version that is supported by your use case. A version higher than that will result in an exit code > 0")
                     .required(false)
-                    .value_parser(value_parser!(u8))
+                    .value_parser(value_parser!(u16))
             )
             .arg(
                 arg!(<path> ... "files to read")
@@ -39,7 +39,7 @@ impl Cli {
             .get_matches();
 
         let paths = matches.try_get_many::<String>("path")?;
-        let max = matches.try_get_one::<u8>("max")?;
+        let max = matches.try_get_one::<u16>("max")?;
 
         if let Some(paths) = paths {
             let paths: Vec<_> = paths.map(|path| path.to_owned()).collect();

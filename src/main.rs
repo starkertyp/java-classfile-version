@@ -6,22 +6,50 @@ use std::{
     fmt::Display,
     fs::File,
     io::{self, Read, Seek},
+    ops::Deref,
     path::Path,
 };
 use thiserror::Error;
-use zip::{result::ZipError, ZipArchive};
+use zip::{ZipArchive, result::ZipError};
 
-#[derive(Debug, PartialEq, PartialOrd, Clone)]
-struct JavaClass(pub u8);
+#[derive(Debug, PartialEq, PartialOrd, Clone, Eq, Ord)]
+struct JavaVersion(pub u16);
 
-impl Display for JavaClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Deref for JavaVersion {
+    type Target = u16;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<JavaClass> for JavaVersion {
+    fn from(value: JavaClass) -> Self {
         // the 44 was scientifically chosen by looking at the table in
         // https://en.wikipedia.org/wiki/Java_class_file#General_layout and doing second grade math
         // (might be a different grade, no idea actually)
-        write!(f, "{} (Java {})", self.0, self.0 - 44)
+        let version = value.0 - 44;
+        Self(version)
     }
 }
+
+impl FromIterator<JavaClass> for JavaVersion {
+    fn from_iter<T: IntoIterator<Item = JavaClass>>(iter: T) -> Self {
+        iter.into_iter()
+            .map(|elem| elem.into())
+            .max()
+            .unwrap_or(JavaVersion(0))
+    }
+}
+
+impl Display for JavaVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(Java {})", *self)
+    }
+}
+
+#[derive(Debug, PartialEq, PartialOrd, Clone)]
+struct JavaClass(pub u16);
 
 const MAGIC_CLASS_HEADER: [u8; 4] = [202, 254, 186, 190]; // CAFEBABE
 const MAGIC_ZIP_HEADER: [u8; 4] = [80, 75, 3, 4]; // I don't think this turns into anything fancy
@@ -45,13 +73,11 @@ impl JavaClass {
             return Err(JavaClassError::InsufficientBytes(read_bytes));
         }
 
-        if !buffer.starts_with(&MAGIC_CLASS_HEADER) {
+        if &buffer[..4] != &MAGIC_CLASS_HEADER {
             return Err(JavaClassError::NotAClassFile);
         }
 
-        // Technically the version is 2 bytes large
-        // but just reading this one byte seems to be sufficient (hopefully).
-        let version = buffer[7];
+        let version = u16::from_be_bytes([buffer[6], buffer[7]]);
 
         Ok(JavaClass(version))
     }
@@ -78,12 +104,11 @@ struct ExtractedJar {
     classfiles: Vec<JavaClass>,
 }
 
-impl TryFrom<String> for ExtractedJar {
-    type Error = ExtractedJarError;
-
-    fn try_from(file: String) -> Result<Self, Self::Error> {
+impl ExtractedJar {
+    fn new(file: &str) -> Result<Self, ExtractedJarError> {
         let mut file = File::open(file)?;
         trace!("Reading archive at {file:?}");
+
         let mut buffer = [0; 4];
 
         let read_bytes = file.read(&mut buffer)?;
@@ -92,12 +117,11 @@ impl TryFrom<String> for ExtractedJar {
         }
 
         // not sure if this is even necessary. ZipArchive::new most likely does something like this as well
-        if !buffer.starts_with(&MAGIC_ZIP_HEADER) {
+        if &buffer != &MAGIC_ZIP_HEADER {
             return Err(ExtractedJarError::NotAJar);
         }
         // Technically we don't know if the jar is actually a jar
         // We just know that the file is a zip file (or, well, we assume it is because the magic bytes said so)
-
         let mut archive = zip::ZipArchive::new(file)?;
         // got here, now we can be pretty sure that this is a zip file! Wait, this isn't really what we were looking for...
 
@@ -153,14 +177,22 @@ fn handle_class<P: AsRef<Path>>(file: P) -> Result<JavaClass, JavaClassError> {
     Ok(class)
 }
 
-fn handle_too_high(class: &JavaClass, max: &Option<u8>, too_high: &mut Option<u8>) {
-    if let Some(max) = max {
-        trace!("max is set; checking");
-        if class.0 > *max {
-            trace!("class version {class:?} is higher than {max}!");
-            *too_high = Some(class.0);
-        }
+fn process_jar(file: &str) -> Result<JavaVersion, ExtractedJarError> {
+    log!("Handling JAR file {file}");
+    let extracted = ExtractedJar::new(&file)?;
+    let version: JavaVersion = JavaVersion::from_iter(extracted.classfiles);
+    if *version == 0 {
+        return Err(ExtractedJarError::NoClassFiles.into());
     }
+    Ok(version)
+}
+
+fn process_class(file: &str) -> Result<JavaVersion, JavaClassError> {
+    log!("Reading from {file}");
+    let class = handle_class(&file)?;
+    let version: JavaVersion = class.into();
+    log!("Class version is {}", version);
+    Ok(version)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -168,75 +200,38 @@ fn main() -> anyhow::Result<()> {
     trace!("{args:?}");
 
     let max = args.max;
-    let mut too_high: Option<u8> = None;
+    let mut too_high = Vec::new();
 
     for file in args.files {
-        if file.ends_with(".jar") {
-            log!("Handling JAR file {file}");
-            let extracted = ExtractedJar::try_from(file)?;
-            let mut largest: Option<JavaClass> = None;
-            for class in extracted.classfiles {
-                match largest {
-                    Some(ref prev) => {
-                        if *prev < class {
-                            largest = Some(class)
-                        }
-                    }
-                    None => largest = Some(class),
-                }
+        let path = Path::new(&file);
+        let extension = path.extension().and_then(|s| s.to_str());
+        let version: anyhow::Result<JavaVersion> = match extension {
+            Some("jar") => process_jar(&file).map_err(|e| e.into()),
+            Some("class") => process_class(&file).map_err(|e| e.into()),
+            _ => {
+                // no idea what this is, guess
+                // doesn't really matter what option we try first, so class it is
+                process_class(&file)
+                    .or_else(|_| process_jar(&file))
+                    .map_err(|e| e.into())
             }
-            if let Some(class) = largest {
-                log!("Largest class version is {class}");
-                handle_too_high(&class, &max, &mut too_high);
-            } else {
-                warn!("Failed to find a single class");
-            }
-        } else if file.ends_with(".class") {
-            log!("Reading from {file}");
-            let class = handle_class(file)?;
-            log!("Class version is {}", class);
-            handle_too_high(&class, &max, &mut too_high);
-        } else {
-            // no idea what this is, guess
-            // doesn't really matter what option we try first, so class it is
-            match handle_class(&file) {
-                Ok(class) => {
-                    log!("Class version is {}", class);
-                    handle_too_high(&class, &max, &mut too_high);
-                }
-                Err(JavaClassError::NotAClassFile) => {
-                    debug!("Not a class file, trying for a jar file");
-                    let extracted = ExtractedJar::try_from(file);
-                    match extracted {
-                        Err(ExtractedJarError::NotAJar) => (),
-                        Err(e) => return Err(e.into()),
-                        Ok(extracted) => {
-                            let mut largest: Option<JavaClass> = None;
-                            for class in extracted.classfiles {
-                                match largest {
-                                    Some(ref prev) => {
-                                        if *prev < class {
-                                            largest = Some(class)
-                                        }
-                                    }
-                                    None => largest = Some(class),
-                                }
-                            }
-                            if let Some(class) = largest {
-                                log!("Largest class version is {class}");
-                                handle_too_high(&class, &max, &mut too_high);
-                            } else {
-                                warn!("Failed to find a single class");
-                            }
-                        }
-                    }
-                }
-                Err(e) => return Err(e.into()),
+        };
+        let version = version?;
+        if let Some(max) = max {
+            trace!("max is set; checking");
+            if *version > max {
+                trace!("version version {version:?} is higher than {max}!");
+                too_high.push(version)
             }
         }
     }
-    if let (Some(max), Some(too_high)) = (max, too_high) {
-        bail!("Found a class with version {too_high:?}, which is higher than the given maximum of {max:?}!");
+    if !too_high.is_empty() {
+        let mut too_high = too_high;
+        too_high.sort();
+        too_high.dedup();
+        bail!(
+            "Found class(es) with version(s) {too_high:?}, which is higher than the given maximum of {max:?}!"
+        );
     }
 
     Ok(())
