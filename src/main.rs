@@ -10,7 +10,7 @@ use std::{
     path::Path,
 };
 use thiserror::Error;
-use zip::{ZipArchive, result::ZipError};
+use zip::{result::ZipError, ZipArchive};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Eq, Ord)]
 struct JavaVersion(pub u16);
@@ -73,7 +73,7 @@ impl JavaClass {
             return Err(JavaClassError::InsufficientBytes(read_bytes));
         }
 
-        if &buffer[..4] != &MAGIC_CLASS_HEADER {
+        if buffer[..4] != MAGIC_CLASS_HEADER {
             return Err(JavaClassError::NotAClassFile);
         }
 
@@ -117,7 +117,7 @@ impl ExtractedJar {
         }
 
         // not sure if this is even necessary. ZipArchive::new most likely does something like this as well
-        if &buffer != &MAGIC_ZIP_HEADER {
+        if buffer != MAGIC_ZIP_HEADER {
             return Err(ExtractedJarError::NotAJar);
         }
         // Technically we don't know if the jar is actually a jar
@@ -179,17 +179,17 @@ fn handle_class<P: AsRef<Path>>(file: P) -> Result<JavaClass, JavaClassError> {
 
 fn process_jar(file: &str) -> Result<JavaVersion, ExtractedJarError> {
     log!("Handling JAR file {file}");
-    let extracted = ExtractedJar::new(&file)?;
+    let extracted = ExtractedJar::new(file)?;
     let version: JavaVersion = JavaVersion::from_iter(extracted.classfiles);
     if *version == 0 {
-        return Err(ExtractedJarError::NoClassFiles.into());
+        return Err(ExtractedJarError::NoClassFiles);
     }
     Ok(version)
 }
 
 fn process_class(file: &str) -> Result<JavaVersion, JavaClassError> {
     log!("Reading from {file}");
-    let class = handle_class(&file)?;
+    let class = handle_class(file)?;
     let version: JavaVersion = class.into();
     log!("Class version is {}", version);
     Ok(version)
@@ -275,12 +275,12 @@ mod tests {
     fn test_java_class_new_valid() {
         let class_bytes = vec![
             202, 254, 186, 190, // CAFEBABE magic
-            0, 0,               // minor version
-            0, 52,              // major version (Java 8)
+            0, 0, // minor version
+            0, 52, // major version (Java 8)
         ];
         let cursor = Cursor::new(class_bytes);
         let result = JavaClass::new(cursor);
-        
+
         assert!(result.is_ok());
         let class = result.unwrap();
         assert_eq!(class.0, 52);
@@ -291,20 +291,20 @@ mod tests {
         let class_bytes = vec![202, 254, 186, 190, 0]; // Only 5 bytes
         let cursor = Cursor::new(class_bytes);
         let result = JavaClass::new(cursor);
-        
+
         assert!(matches!(result, Err(JavaClassError::InsufficientBytes(5))));
     }
 
     #[test]
     fn test_java_class_new_invalid_magic() {
         let class_bytes = vec![
-            1, 2, 3, 4,         // Invalid magic
-            0, 0,               // minor version
-            0, 52,              // major version
+            1, 2, 3, 4, // Invalid magic
+            0, 0, // minor version
+            0, 52, // major version
         ];
         let cursor = Cursor::new(class_bytes);
         let result = JavaClass::new(cursor);
-        
+
         assert!(matches!(result, Err(JavaClassError::NotAClassFile)));
     }
 
@@ -319,7 +319,7 @@ mod tests {
         let v8 = JavaVersion(8);
         let v11 = JavaVersion(11);
         let v17 = JavaVersion(17);
-        
+
         assert!(v8 < v11);
         assert!(v11 < v17);
         assert!(v8 < v17);
@@ -330,7 +330,7 @@ mod tests {
         let c50 = JavaClass(50);
         let c52 = JavaClass(52);
         let c55 = JavaClass(55);
-        
+
         assert!(c50 < c52);
         assert!(c52 < c55);
         assert!(c50 < c55);
